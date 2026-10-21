@@ -8,3 +8,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .env
+
+# Patch/backup artifacts from local patch application
+*.orig
+*.rej
+
+# Private task plans and evidence
+tmp/

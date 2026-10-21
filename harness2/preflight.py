@@ -40,13 +40,22 @@ def check(adapter, *, judge=False) -> list[str]:
                 errors.append(f"{label} failed; {remedy}")
             return r.returncode == 0
         except (OSError, subprocess.TimeoutExpired) as exc:
-            errors.append(f"{label}: {type(exc).__name__}; see README.md")
+            if isinstance(exc, subprocess.TimeoutExpired):
+                where = exc.cmd[0]
+                why = f"no response in {exc.timeout}s"
+            else:
+                where = exc.filename or cmd[0]
+                why = exc.strerror or type(exc).__name__
+            errors.append(f"{label}: {why} ({where}); see README.md")
             return False
 
     for validate in (
         lambda: config.validate_models(judge=judge),
         adapter.tasks,
-        OpencodeSubstrate().preflight,
+        # The improver runs through OpenCode whatever the executor substrate is, so this
+        # checkout is always required -- but an opencode executor's own adapter.preflight
+        # below already demands it, and running it twice reports one defect as two issues.
+        OpencodeSubstrate().preflight if adapter.substrate.name != "oc" else (lambda: None),
         adapter.preflight,
     ):
         try:

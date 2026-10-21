@@ -59,6 +59,7 @@ https://github.com/user-attachments/assets/76b10548-b14b-4c8f-9aa5-a93662df4d56
 - [Run a benchmark](#run-a-benchmark)
 - [Ordinary tasks](#ordinary-tasks-fork-feature)
 - [Experiments](#experiments)
+- [Upstream fixes](docs/UPSTREAM_FIXES.md)
 - [Web access](#web-access)
 - [Results and resume](#results-and-resume)
 - [Citation](#citation)
@@ -85,14 +86,36 @@ Use **Linux, Python 3.12, and [uv](https://docs.astral.sh/uv/getting-started/ins
 From the repository root:
 
 ```bash
-uv venv --python 3.12 .venv
+uv sync --locked --extra render
 source .venv/bin/activate
-uv pip install -e '.[render]'
 harness2-demo --output runs/demo --k 2
+harness2-dashboard --run runs/demo
+```
+
+`uv sync --locked` installs Python 3.12 from `.python-version`, the versions
+pinned in `uv.lock` and the `dev` group (pytest, ruff); `--extra render` adds the
+Office renderers that the demo and benchmarks use. Tests and lint run from the
+same lock:
+
+```bash
+uv run --locked pytest tests -q
+uv run --locked ruff check .
+```
+
+An editable install into an environment you already manage keeps working:
+
+```bash
+uv pip install -e '.[render]'
 ```
 
 The local demo runs both recursion modes with deterministic editors and real
-Python executions. It requires no model credentials.
+Python executions. It requires no model credentials. `harness2-dashboard` writes
+one self-contained HTML file next to the run: no JavaScript, no network request,
+and every string taken from the run tree is escaped. The demo has no independent
+judge, so its page shows **unverified agreement** with the reference output the
+run selected — not accuracy or a score. Ordinary-task runs pass their
+`report.json` judge results to the same command (see
+[Ordinary tasks](#ordinary-tasks-fork-feature)).
 
 For model-backed benchmarks, install **Node.js 20+, the Google Cloud CLI**, and
 the [benchmark dependencies](docs/SETUP.md#requirements). LAB needs Pandoc and
@@ -144,12 +167,23 @@ This fork also runs a plain task you own, not only a benchmark cell. Declare the
 family in JSON — a literal executor argv with no implicit shell, a declared answer file,
 an optional independent judge, and one editor model — and the same native
 Propose–Probe–Compose, selection, reflection and post-selection judging run against it.
-Nothing in `harness2/core`, `harness2/substrate` or `harness2/benchmarks` changes.
+The ordinary adapter is a thin manifest layer: it implements the existing adapter seam
+and delegates to `harness2/core`, `harness2/substrate` and the installed OpenCode CLI,
+so the benchmark code paths are shared rather than forked. The upstream fixes adopted on
+top of that shared code (runner exit status, timeouts, rollout isolation, caches,
+preflight) are listed in [docs/UPSTREAM_FIXES.md](docs/UPSTREAM_FIXES.md).
 
 ```bash
 harness2-ordinary --manifest examples/ordinary-task/manifest.json \
   --output runs/ordinary-1 --k 1 --modes parallel
+harness2-dashboard --run runs/ordinary-1
 ```
+
+The dashboard reads `report.json` and shows, per task and mode, the recorded
+post-selection judge result for the adopted run and the base run. A judge that is
+disabled, not reached or failed is `unknown` — never a zero and never a failure
+colour. `--compare runs/ordinary-1 runs/ordinary-2` writes a side-by-side page;
+agreement between runs is reported as agreement, not as accuracy.
 
 Editor isolation follows the launcher: `service` inherits the installed shared service's
 XDG data/state (so parallel calls resolve the one running service), while `standalone`
@@ -157,7 +191,8 @@ gets an ephemeral per-call XDG root outside the evidence tree. Either way each c
 its own native session label, workspace and receipts. `report.json` also carries an
 `editor_health` block read from
 the editor exit receipts: if every editor call of a task failed, the task is reported
-degraded and the CLI exits `1` even when the native status is `ok`.
+degraded and the CLI exits `1`, and a failed proposer stage also makes the task status
+`partial` with the stage error in `errors`.
 
 Each invocation needs a fresh `--output`; there is no resume or cache reuse. See
 [docs/ORDINARY_TASKS.md](docs/ORDINARY_TASKS.md) for the manifest schema, the executor,

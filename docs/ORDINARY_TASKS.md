@@ -5,20 +5,28 @@ additive path for a *plain* task you own: declare the task family in JSON, and t
 native Propose–Probe–Compose, selection, reflection and post-selection judging run
 against it.
 
-Nothing in `harness2/core`, `harness2/substrate` or `harness2/benchmarks` is modified
-for this feature. `ManifestAdapter` satisfies the existing adapter seam, and
-`InstalledOpenCodeProposer` changes only the editor launch.
+The ordinary path is a manifest layer over the existing seams, not a second method:
+`ManifestAdapter` satisfies the adapter seam and delegates task loading, recursion,
+selection, reflection and judging to `harness2/core`, and
+`InstalledOpenCodeProposer` changes only the editor launch. Fixes adopted from upstream
+onto those shared code paths are listed in
+[docs/UPSTREAM_FIXES.md](UPSTREAM_FIXES.md).
 
 ## Quick start
 
 ```bash
-uv venv --python 3.12 .venv
+uv sync --locked --extra render
 source .venv/bin/activate
-uv pip install -e '.[render]'
 
 harness2-ordinary --manifest examples/ordinary-task/manifest.json \
   --output runs/ordinary-1 --k 1 --modes parallel
+harness2-dashboard --run runs/ordinary-1
 ```
+
+`uv sync --locked` installs Python 3.12 from `.python-version`, the pinned
+dependencies in `uv.lock` and the `dev` group (pytest, ruff); `--extra render`
+adds the Office renderers. Run the checks without activating the environment
+with `uv run --locked pytest tests -q` and `uv run --locked ruff check .`.
 
 The example is synthetic: one release-notes file, a deliberately incomplete
 `scripts/summarize.py`, an executor that runs it, and a judge that recomputes the
@@ -36,9 +44,9 @@ continuation. Within one run, an executor call is idempotent for the same immuta
 identity (manifest, task, source, base harness, expanded argv, timeouts, editor
 settings); it is never reused across runs.
 
-Exit codes: `0` every task finished, `1` at least one task did not — including a task
-whose native status is `ok` while every editor call failed, or a real editor task with
-`ok` native status but no editor receipt (see
+Exit codes: `0` every task finished, `1` at least one task did not — a failed stage
+(native status `partial` or `base-failed`, which is why `errors` is non-empty), a task
+in which every editor call failed, or a real editor task with no editor receipt (see
 [Editor health](#editor-health)) — `2` misconfiguration (manifest, arguments or output
 directory).
 
@@ -179,15 +187,24 @@ no editor call succeeded, so a green `status` alone does not mean the editor wor
  "degraded": true, "failed_labels": ["inv1.a1"], "succeeded_labels": []}
 ```
 
-`state` is `no_calls`, `all_failed`, `partial` or `all_succeeded`. `all_failed` marks
-the task degraded: the adapter reports it, lists it under `degraded_tasks`, prints it on
-stderr, and the CLI exits `1` even though the native `status` is `ok`. A `partial`
-state stays distinct and is not called degraded. For the real editor proposer, an `ok`
-native status with `no_calls` is also degraded because it has no editor evidence. The
-run-level `editor_health.degraded` is true whenever any task is degraded, even if its
-run-level state is `no_calls`. The native `status` field is left
-untouched, and a judged delta measured while `all_failed` is not a tested model effect
-— no editor work produced it.
+`state` is `no_calls`, `all_failed`, `partial` or `all_succeeded`; it is computed from
+the receipts only, never from the native status. `all_failed` marks the task degraded:
+the adapter reports it, lists it under `degraded_tasks`, prints it on stderr, and the
+CLI exits `1`. A failed proposer stage is also recorded in the native result: the task
+status becomes `partial` and `errors` carries one entry per failed stage (for example
+`proposer execution failed: …`), so a stage outage is visible even when selection and
+reflection fall back to the inherited harness and still deliver an output. A run of
+editor calls whose state is `partial` stays distinct and is not called degraded. For
+the real editor proposer, an `ok` native status with `no_calls` is degraded because it
+has no editor evidence. The run-level `editor_health.degraded` is true whenever any task
+is degraded, even if its run-level state is `no_calls`. A judged delta measured while
+`all_failed` is not a tested model effect — no editor work produced it.
+
+Limitation: editor calls made after selection (the experience/reflection step) are not
+native stages. Their failures show up in the receipt-based `editor_health` and cost, but
+they add nothing to `errors` and do not by themselves change the native status. A clean
+native `status` therefore does not prove that every editor call succeeded; read it
+together with `editor_health`.
 
 ## Judge contract
 
@@ -228,6 +245,35 @@ answers are never copied into editor or solver evidence.
 - `editor_health` is derived from the editor's own `exit.json` receipts. A task in state
   `all_failed` is reported as degraded and exits `1`; its native `status` and fallback
   labels are never presented as editor success.
+
+## Dashboard
+
+`harness2-dashboard --run <output>` writes `<output>/dashboard.html`: one
+self-contained file, no JavaScript and no network request, so it can be attached
+to a report or committed as-is. It reads `report.json` and shows each task and
+mode with its native status, selection and editor health, plus the recorded
+post-selection judge result:
+
+| Judge cell | Meaning |
+|---|---|
+| `judged: selected … · base … · Δ …` | Both the adopted run and the base run were graded. `Δ` appears only when the two runs recorded the same configuration (`configured_match`). |
+| `unknown — judge disabled for this run` | The manifest declares no judge, or `--no-judge` was passed. |
+| `unknown — no post-selection judge record` | Selection did not complete, or the judge was never reached. |
+| `unknown — judged pair unavailable: …` | The judge ran but failed (non-zero exit, timeout, malformed output); the recorded error follows. |
+
+`unknown` is styled neutrally, is excluded from any denominator and is never a
+zero or a failure. Degraded tasks (every editor call failed, or no editor receipt)
+get a banner: a judged delta measured in that state is not a tested model effect.
+
+`--compare A B` writes a side-by-side page (`<parent of A>/dashboard_compare.html`):
+judge coverage per run and, for ordinary runs, the judge cell per task/mode. Two
+runs agreeing is agreement, not accuracy. The local demo and the benchmark sweeps
+have no judge, so their page shows the reference-agreement view with an explicit
+*unverified* banner instead of any score.
+
+`--open` asks the default browser to open the local file; the page itself never
+fetches anything. Every string read from a run directory (task ids, labels,
+answers, trajectories, judge errors) is HTML-escaped.
 
 ## Limits
 
