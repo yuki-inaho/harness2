@@ -37,7 +37,8 @@ identity (manifest, task, source, base harness, expanded argv, timeouts, editor
 settings); it is never reused across runs.
 
 Exit codes: `0` every task finished, `1` at least one task did not — including a task
-whose native status is `ok` while every editor call failed or no editor receipt exists (see
+whose native status is `ok` while every editor call failed, or a real editor task with
+`ok` native status but no editor receipt (see
 [Editor health](#editor-health)) — `2` misconfiguration (manifest, arguments or output
 directory).
 
@@ -140,10 +141,11 @@ Environment isolation follows the launcher, and `start.json` records it as
 | Launcher | XDG data/state | Why |
 |---|---|---|
 | `service` (default) | Inherited from the invoking environment (`inherited_shared_service`) | The client must resolve the already-running shared OpenCode service. Overriding `XDG_DATA_HOME`/`XDG_STATE_HOME` per call made every client try to start its own managed service on the one fixed global port, so parallel native calls failed against each other and the running service. |
-| `standalone` | Per call, under `<output>/audit/sessions/<label>/.xdg/` (`per_call`) | A standalone run starts its own local process, so its database and state are kept out of the shared install. |
+| `standalone` | Per call, in an ephemeral OS temporary directory outside `<output>` (`ephemeral_per_call`) | A standalone run starts its own local process. Its database and state are removed after the call, so they do not become part of the evidence tree. |
 
-In both modes the adapter sets only `PWD` and `OPENCODE_PERMISSION`, which limits
-external directory reads to that workspace. It never changes the global OpenCode
+In `service` mode the adapter sets `PWD` and `OPENCODE_PERMISSION`; in `standalone`
+mode it also sets per-call `XDG_DATA_HOME` and `XDG_STATE_HOME`. The permission setting
+limits external directory reads to that workspace. It never changes the global OpenCode
 configuration, the service port, credentials or the provider, and it never switches
 launcher or model on its own.
 
@@ -181,7 +183,9 @@ no editor call succeeded, so a green `status` alone does not mean the editor wor
 the task degraded: the adapter reports it, lists it under `degraded_tasks`, prints it on
 stderr, and the CLI exits `1` even though the native `status` is `ok`. A `partial`
 state stays distinct and is not called degraded. For the real editor proposer, an `ok`
-native status with `no_calls` is also degraded because it has no editor evidence. The native `status` field is left
+native status with `no_calls` is also degraded because it has no editor evidence. The
+run-level `editor_health.degraded` is true whenever any task is degraded, even if its
+run-level state is `no_calls`. The native `status` field is left
 untouched, and a judged delta measured while `all_failed` is not a tested model effect
 — no editor work produced it.
 
@@ -234,7 +238,9 @@ answers are never copied into editor or solver evidence.
   install's XDG data/state, so editor sessions share its database. Isolation between
   calls is a fresh native session, a separate workspace, label and receipt directory —
   not a separate database, and no stronger isolation is claimed. `standalone` keeps its
-  per-call XDG root but, like any local OpenCode process, is still not an OS sandbox.
+  ephemeral per-call XDG root outside the evidence tree but, like any local OpenCode
+  process, is still not an OS sandbox. Raw editor event logs and model outputs can
+  contain private task data and must be reviewed before external publication.
 - The judge gate checks that an adoption record exists; it is not a lock against a
   separately written file, and its receipts live under `<runs>/judge/<task>/<run>/` so
   one task's evidence is never overwritten by another's.

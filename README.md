@@ -153,8 +153,9 @@ harness2-ordinary --manifest examples/ordinary-task/manifest.json \
 
 Editor isolation follows the launcher: `service` inherits the installed shared service's
 XDG data/state (so parallel calls resolve the one running service), while `standalone`
-gets a per-call XDG root. Either way each call keeps its own native session label,
-workspace and receipts. `report.json` also carries an `editor_health` block read from
+gets an ephemeral per-call XDG root outside the evidence tree. Either way each call keeps
+its own native session label, workspace and receipts. `report.json` also carries an
+`editor_health` block read from
 the editor exit receipts: if every editor call of a task failed, the task is reported
 degraded and the CLI exits `1` even when the native status is `ok`.
 

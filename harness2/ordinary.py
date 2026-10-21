@@ -47,8 +47,10 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -961,7 +963,7 @@ def _parse_judgment(doc: Any, where: Path) -> dict:
 
 
 def editor_env(
-    cwd: Path, session: Path, launcher: str, base: Mapping[str, str] | None = None
+    cwd: Path, state_root: Path, launcher: str, base: Mapping[str, str] | None = None
 ) -> tuple[dict[str, str], list[str]]:
     """The exact environment for one editor launch, and the keys the adapter itself set.
 
@@ -985,8 +987,8 @@ def editor_env(
     )
     keys = list(EDITOR_ENV_BASE)
     if launcher == "standalone":
-        env["XDG_DATA_HOME"] = str(session / ".xdg" / "data")
-        env["XDG_STATE_HOME"] = str(session / ".xdg" / "state")
+        env["XDG_DATA_HOME"] = str(state_root / "data")
+        env["XDG_STATE_HOME"] = str(state_root / "state")
         keys += list(EDITOR_ENV_XDG)
     return env, keys
 
@@ -1108,40 +1110,49 @@ class InstalledOpenCodeProposer(Proposer):
         session.mkdir(parents=True, exist_ok=True)
 
         argv = self.argv_for(label)
-        env, env_keys = editor_env(cwd, session, self.launcher)
-        (session / "start.json").write_text(
-            json.dumps(
-                {
-                    "schema": 1,
-                    "label": label,
-                    "argv": argv,
-                    "cwd": str(cwd),
-                    "model": self.spec.model,
-                    "steps_configured": self.spec.steps,
-                    "steps_enforced": False,
-                    "launcher": self.launcher,
-                    "startup_timeout_s": self.startup_timeout_s,
-                    "wall_timeout_s": wall,
-                    "env_keys_set": env_keys,
-                    "xdg_isolation": (
-                        "per_call" if self.launcher == "standalone" else "inherited_shared_service"
-                    ),
-                },
-                indent=2,
+        state_context = (
+            tempfile.TemporaryDirectory(prefix="harness2-opencode-")
+            if self.launcher == "standalone"
+            else nullcontext(None)
+        )
+        with state_context as temporary_state:
+            state_root = Path(temporary_state) if temporary_state else session
+            env, env_keys = editor_env(cwd, state_root, self.launcher)
+            (session / "start.json").write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "label": label,
+                        "argv": argv,
+                        "cwd": str(cwd),
+                        "model": self.spec.model,
+                        "steps_configured": self.spec.steps,
+                        "steps_enforced": False,
+                        "launcher": self.launcher,
+                        "startup_timeout_s": self.startup_timeout_s,
+                        "wall_timeout_s": wall,
+                        "env_keys_set": env_keys,
+                        "xdg_isolation": (
+                            "ephemeral_per_call"
+                            if self.launcher == "standalone"
+                            else "inherited_shared_service"
+                        ),
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
             )
-            + "\n",
-            encoding="utf-8",
-        )
 
-        result = run_bounded(
-            argv,
-            cwd=cwd,
-            env=env,
-            timeout_s=wall,
-            stdout_path=session / "events.jsonl",
-            stderr_path=session / "stderr.log",
-            startup_timeout_s=self.startup_timeout_s,
-        )
+            result = run_bounded(
+                argv,
+                cwd=cwd,
+                env=env,
+                timeout_s=wall,
+                stdout_path=session / "events.jsonl",
+                stderr_path=session / "stderr.log",
+                startup_timeout_s=self.startup_timeout_s,
+            )
         (session / "process.json").write_text(
             json.dumps(
                 {
@@ -1191,12 +1202,9 @@ class InstalledOpenCodeProposer(Proposer):
         )
         with self._costs_lock:
             self._costs.append(cost)
-        receipt = str(session / "exit.json")
-        if self.audit_dir:
-            try:
-                receipt = str((session / "exit.json").relative_to(self.audit_dir))
-            except (TypeError, ValueError):
-                pass
+        receipt = str(
+            Path("sessions" if self.audit_dir else ".session") / session.name / "exit.json"
+        )
         with self._sessions_lock:
             self._sessions.append(
                 {

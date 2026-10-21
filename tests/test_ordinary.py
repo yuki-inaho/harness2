@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -922,7 +923,7 @@ class InstalledCliTests(Base):
         fake = self.write_cli(
             "opencode-env",
             "#!/usr/bin/env python3\n"
-            "import json, os, pathlib, sys\n"
+            "import json, os, pathlib, sys, time\n"
             "args = sys.argv[1:]\n"
             "label = args[args.index('--title') + 1] if '--title' in args else 'x'\n"
             "cap = pathlib.Path(os.environ['H2_TEST_ENV_CAPTURE'])\n"
@@ -933,6 +934,7 @@ class InstalledCliTests(Base):
             "    'PWD': os.environ.get('PWD'),\n"
             "    'OPENCODE_PERMISSION': os.environ.get('OPENCODE_PERMISSION'),\n"
             "}))\n"
+            "time.sleep(0.2)\n"
             "out = pathlib.Path('output')\n"
             "out.mkdir(exist_ok=True)\n"
             "(out / 'answer.md').write_text('env captured\\n')\n",
@@ -953,7 +955,11 @@ class InstalledCliTests(Base):
                 startup_timeout_s=10,
                 cli=str(fake),
             )
-            self.assertTrue(service.call("Do it.", None, "svc1", max_attempts=1).ok)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(service.call, "Do it.", None, "svc1", max_attempts=1)
+                second = pool.submit(service.call, "Do it.", None, "svc2", max_attempts=1)
+                self.assertTrue(first.result().ok)
+                self.assertTrue(second.result().ok)
             standalone = InstalledOpenCodeProposer(
                 spec,
                 audit_dir=self.tmp / "audit",
@@ -966,6 +972,9 @@ class InstalledCliTests(Base):
         service_env = json.loads((capture / "svc1.json").read_text())
         self.assertEqual(service_env["XDG_DATA_HOME"], str(installed / "data"))
         self.assertEqual(service_env["XDG_STATE_HOME"], str(installed / "state"))
+        second_env = json.loads((capture / "svc2.json").read_text())
+        self.assertEqual(second_env["XDG_DATA_HOME"], service_env["XDG_DATA_HOME"])
+        self.assertEqual(second_env["XDG_STATE_HOME"], service_env["XDG_STATE_HOME"])
         self.assertIn("external_directory", json.loads(service_env["OPENCODE_PERMISSION"]))
         service_start = json.loads(
             (self.tmp / "audit" / "sessions" / "svc1" / "start.json").read_text()
@@ -974,9 +983,14 @@ class InstalledCliTests(Base):
         self.assertEqual(service_start["xdg_isolation"], "inherited_shared_service")
 
         standalone_env = json.loads((capture / "std1.json").read_text())
-        session_xdg = self.tmp / "audit" / "sessions" / "std1" / ".xdg"
-        self.assertEqual(standalone_env["XDG_DATA_HOME"], str(session_xdg / "data"))
-        self.assertEqual(standalone_env["XDG_STATE_HOME"], str(session_xdg / "state"))
+        standalone_data = Path(standalone_env["XDG_DATA_HOME"])
+        standalone_state = Path(standalone_env["XDG_STATE_HOME"])
+        self.assertEqual(standalone_data.name, "data")
+        self.assertEqual(standalone_state.name, "state")
+        self.assertEqual(standalone_data.parent, standalone_state.parent)
+        self.assertTrue(standalone_data.parent.name.startswith("harness2-opencode-"))
+        self.assertFalse(standalone_data.parent.exists(), "ephemeral state must be removed")
+        self.assertFalse(str(standalone_data).startswith(str(self.tmp / "audit")))
         self.assertNotEqual(standalone_env["XDG_DATA_HOME"], service_env["XDG_DATA_HOME"])
         standalone_start = json.loads(
             (self.tmp / "audit" / "sessions" / "std1" / "start.json").read_text()
@@ -985,7 +999,7 @@ class InstalledCliTests(Base):
             standalone_start["env_keys_set"],
             ["PWD", "OPENCODE_PERMISSION", "XDG_DATA_HOME", "XDG_STATE_HOME"],
         )
-        self.assertEqual(standalone_start["xdg_isolation"], "per_call")
+        self.assertEqual(standalone_start["xdg_isolation"], "ephemeral_per_call")
 
         self.assertNotEqual(service_start["label"], standalone_start["label"])
         self.assertEqual(service.health()["state"], "all_succeeded")
@@ -1066,6 +1080,9 @@ class DegradedRunTests(Base):
         self.assertEqual(integration["editor_health"]["state"], "no_calls")
         self.assertTrue(integration["degraded"])
         self.assertIn("no editor calls", integration["reason"])
+        run_health = ordinary_cli._run_health(proposer, [{"integration": integration}])
+        self.assertEqual(run_health["state"], "no_calls")
+        self.assertTrue(run_health["degraded"])
 
 
 if __name__ == "__main__":

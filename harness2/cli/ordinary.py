@@ -25,7 +25,7 @@ There is no resume: every invocation needs a FRESH output directory, and an occu
 one is rejected before anything is written.
 
 Exit codes: 0 every task finished, 1 at least one task did not (including a task whose
-editor calls all failed or whose `ok` native status has no editor receipts), 2 misconfiguration
+editor calls all failed, or a real editor task with `ok` native status but no receipts), 2 misconfiguration
 (manifest, arguments, or output directory).
 
     python3 -m harness2.cli.ordinary --manifest examples/ordinary-task/manifest.json \\
@@ -213,6 +213,7 @@ def main(argv=None) -> int:
     degraded_tasks = [
         str(row["task_id"]) for row in task_rows if (row.get("integration") or {}).get("degraded")
     ]
+    run_health = _run_health(prop, task_rows)
     report = {
         "schema": 1,
         "name": manifest.name,
@@ -228,7 +229,7 @@ def main(argv=None) -> int:
         "editor": plan["editor"],
         "judge_enabled": bool(manifest.judge) and not args.no_judge,
         "cost": prop.cost_summary(),
-        "editor_health": editor_health(_receipts(prop)),
+        "editor_health": run_health,
         "degraded_tasks": degraded_tasks,
         "tasks": task_rows,
         "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -360,6 +361,16 @@ def _receipts(prop: object) -> list[dict]:
     """Editor receipts if this proposer records them; a scripted double records none."""
     getter = getattr(prop, "session_receipts", None)
     return list(getter()) if callable(getter) else []
+
+
+def _run_health(prop: object, task_rows: list[dict]) -> dict:
+    """Keep the run-level degraded flag consistent with its task rows."""
+    health = editor_health(_receipts(prop))
+    health["degraded"] = bool(
+        health["degraded"]
+        or any((row.get("integration") or {}).get("degraded") for row in task_rows)
+    )
+    return health
 
 
 def _integration(
