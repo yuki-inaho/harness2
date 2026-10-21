@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "name": "ordinary",
+  "domain": "release-notes",
+  "base_harness": "base",
+  "tasks_dir": "tasks",
+  "task_prompt": "task.md",
+  "task_source": "source",
+  "executor": {
+    "argv": [
+      "python3",
+      "{manifest_dir}/tools/answer.py",
+      "--task",
+      "{task_dir}",
+      "--harness",
+      "{harness_dir}",
+      "--out",
+      "{run_dir}/answer.md"
+    ],
+    "answer": "answer.md",
+    "timeout_s": 120,
+    "model": "declared-example-label"
+  },
+  "editor": {
+    "channel": "opencode",
+    "model": "example/provider#high",
+    "steps": 40,
+    "timeout_s": 900,
+    "startup_timeout_s": 120,
+    "launcher": "service"
+  },
+  "judge": {
+    "argv": [
+      "python3",
+      "{manifest_dir}/tools/judge.py",
+      "--task",
+      "{task_dir}",
+      "--answer",
+      "{answer}"
+    ],
+    "timeout_s": 60
+  },
+  "prompts": {
+    "work": "summarize the release notes in notes.txt",
+    "deliverable_word": "summary"
+  },
+  "leak_globs": ["expected*", "judge.json"],
+  "obs_trunc": 20000
+}
