@@ -510,6 +510,11 @@ def _run_one_mode(
         library_dir=lib_dir,
     )
     res.modes[mode] = r.to_dict()
+    res.errors.extend(
+        f"{mode}: {stage.label}: proposer execution failed: {stage.error}"
+        for stage in r.stages
+        if stage.execution_failed
+    )
     candidates = selection.selection_pool(mode, k, r.rollouts, base)
     if pool_policy == "finals" and k == 1:
         sel = selection.trivial_selection(
@@ -653,6 +658,7 @@ def run_task(
             )
         except Exception as exc:
             res.modes[mode] = {
+                **(res.modes.get(mode) or {}),
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
                 "traceback": traceback.format_exc()[-1500:],

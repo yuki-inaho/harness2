@@ -23,6 +23,16 @@ dependencies = []
 render = ["openpyxl>=3.1,<4", "python-pptx>=1,<2"]
 bridge = ["litellm[proxy]==1.95.0", "fastapi==0.139.2", "google-auth==2.56.3"]
 
+# `uv sync` installs this group by default; it is not part of a published wheel.
+# setuptools is pinned to the build requirement so the source-distribution test can
+# build an archive offline instead of skipping.
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "ruff>=0.6",
+    "setuptools>=77",
+]
+
 [project.scripts]
 harness2 = "harness2.cli.run_sweep:main"
 harness2-judge = "harness2.cli.judge:main"
@@ -30,6 +40,7 @@ harness2-report = "harness2.cli.report:main"
 harness2-setup = "harness2.cli.setup:main"
 harness2-check = "harness2.cli.check:main"
 harness2-demo = "harness2.cli.demo:main"
+harness2-dashboard = "harness2.cli.dashboard:main"
 harness2-bridge = "harness2.cli.bridge:main"
 harness2-ordinary = "harness2.cli.ordinary:main"
 

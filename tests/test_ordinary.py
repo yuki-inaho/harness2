@@ -1007,7 +1007,7 @@ class InstalledCliTests(Base):
 
 
 class DegradedRunTests(Base):
-    """An all-editor-fail run must not look green just because native status is `ok`."""
+    """An all-editor-fail run must not look green in either native status or editor health."""
 
     def test_health_states_keep_partial_success_distinct_from_all_failed(self):
         ok = {"label": "ok1", "error": ""}
@@ -1053,8 +1053,15 @@ class DegradedRunTests(Base):
         self.assertIn("degraded (editor calls failed", err.getvalue())
         report = json.loads((output / "report.json").read_text())
         row = report["tasks"][0]
-        self.assertEqual(row["status"], "ok", "native status is kept as its own fact")
-        self.assertEqual(row["errors"], [])
+        # #110: a proposer execution failure is a failed stage, so the native task is
+        # `partial` even though selection/reflection still fall back and deliver. The
+        # earlier contract reported `ok` here, which hid the outage behind fallbacks.
+        self.assertEqual(row["status"], "partial", "a failed stage is not a successful run")
+        self.assertEqual(len(row["errors"]), 3)
+        self.assertTrue(
+            all("proposer execution failed" in error for error in row["errors"]),
+            row["errors"],
+        )
         health = row["integration"]["editor_health"]
         self.assertEqual((health["n_sessions"], health["n_failed"]), (8, 8))
         self.assertEqual(health["n_succeeded"], 0)

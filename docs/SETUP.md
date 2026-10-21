@@ -163,3 +163,28 @@ A wheel ships the `harness2` package only. The task partitioner,
 `python scripts/split_tasks.py`, requires this source tree. For a wheel
 installation, work from a dedicated directory: `.env`, `dependencies/`, and
 `runs/` are resolved there.
+
+A source distribution (`.tar.gz`) does carry `third_party/` and
+`dependencies/ASSETS.json`, so `harness2-setup` and
+`python scripts/check_provenance.py` work from an extracted sdist; a wheel does
+not. See [third_party/README.md](../third_party/README.md).
+
+## Development checks
+
+The development environment is pinned by `.python-version` (Python 3.12) and
+`uv.lock`; the `dev` group adds pytest, ruff and the setuptools build used by the
+source-distribution test.
+
+```bash
+uv sync --locked --extra render
+uv run --locked pytest tests -q
+uv run --locked ruff check .
+uv run --locked python scripts/check_provenance.py
+```
+
+`--extra render` installs the Office renderers the demo and benchmarks use;
+`uv run --locked` uses the same lock as `uv sync`. After changing a file under
+`third_party/`, regenerate its checksum in `dependencies/ASSETS.json`, rebuild
+the lock if dependencies moved (`uv lock`), and rerun the four commands above.
+The suite is offline: it drives fixture executables and synthetic run
+directories, and a passing test is a contract check, not a model-quality result.

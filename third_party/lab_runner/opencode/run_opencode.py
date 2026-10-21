@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -165,19 +166,75 @@ def build_env(workspace: Path, doc_parser: str) -> dict:
     return env
 
 
+def _signal_group(pgid: int, sig: int) -> None:
+    """Signal a whole process group; a group that is already gone is not an error."""
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _leader_exited(proc: subprocess.Popen) -> bool:
+    """Whether the leader has exited, ideally without reaping it.
+
+    `WNOWAIT` leaves the leader a zombie, so its pid — which is the process group id
+    this call owns — cannot be recycled before the group is signalled.
+    """
+    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+        try:
+            done = os.waitid(
+                os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+            )
+            return done is not None
+        except ChildProcessError:
+            return True
+    return proc.poll() is not None
+
+
+def _terminate_process(proc: subprocess.Popen, *, grace: float = 30) -> int:
+    """Stop the process group this call owns, preserving GNU timeout's 124/137 statuses.
+
+    SIGTERM goes to the group, not only to the leader. A leader that exits within the
+    grace period returns 124, and anything still in its group (a child that ignored
+    SIGTERM) is then SIGKILLed: the run is already a failed timeout, and a surviving
+    descendant would outlive its own receipt. 137 means the leader itself had to be
+    killed. A descendant that left the group (setsid/daemonize) is out of reach.
+    """
+    pgid = proc.pid
+    _signal_group(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if _leader_exited(proc):
+            _signal_group(pgid, signal.SIGKILL)
+            proc.wait()
+            return 124
+        time.sleep(0.05)
+    _signal_group(pgid, signal.SIGKILL)
+    proc.wait()
+    return 137
+
+
 def invoke(args_extra: list[str], *, base: list[str], env: dict, timeout: int,
            session_path: Path, log_path: Path, append: bool) -> int:
     """One `opencode run`, appending its JSON stream to session_path."""
     with open(session_path, "a" if append else "w", encoding="utf-8") as out, \
          open(log_path, "a", encoding="utf-8") as err:
-        proc = subprocess.run(
-            ["timeout", "--kill-after=30s", str(int(max(30, timeout)))] + base + args_extra,
-            stdout=out, stderr=err, env=env, cwd=str(BENCH_ROOT),
-        )
-    return proc.returncode
+        try:
+            proc = subprocess.Popen(
+                base + args_extra,
+                stdout=out, stderr=err, env=env, cwd=str(BENCH_ROOT),
+                start_new_session=True,
+            )
+        except OSError as exc:
+            print(f"Could not start OpenCode: {type(exc).__name__}: {exc}", file=err)
+            return 127
+        try:
+            return proc.wait(timeout=int(max(30, timeout)))
+        except subprocess.TimeoutExpired:
+            return _terminate_process(proc)
 
 
-def main(args) -> None:
+def main(args) -> int:
     force_utf8_stdio()
     _load_env()
 
@@ -353,6 +410,7 @@ def main(args) -> None:
     print(f"  Deliverables:   {', '.join(delivered) or 'NONE'}")
     print(f"  Exit code:      {rc}")
     print(f"\nResults saved to: {results_dir}")
+    return rc
 
 
 parser = argparse.ArgumentParser(description="Run a LAB task through OpenCode")
@@ -415,4 +473,4 @@ parser.add_argument("--bun", default=DEFAULT_BUN, help="Path to the bun binary")
 
 
 if __name__ == "__main__":
-    main(parser.parse_args())
+    sys.exit(main(parser.parse_args()))
