@@ -1,0 +1,7 @@
+add: csv export
+fix: crash on an empty file
+# internal note, not a change
+add: dark mode
+fix: duplicate header in the PDF export
+
+fix: slow start on large histories

@@ -57,6 +57,7 @@ https://github.com/user-attachments/assets/76b10548-b14b-4c8f-9aa5-a93662df4d56
 - [Harness components](#harness-components)
 - [Install](#install)
 - [Run a benchmark](#run-a-benchmark)
+- [Ordinary tasks](#ordinary-tasks-fork-feature)
 - [Experiments](#experiments)
 - [Web access](#web-access)
 - [Results and resume](#results-and-resume)
@@ -136,6 +137,34 @@ Choose one benchmark per command. WorkBuddy also takes `--subset office`,
 `--subset web`, or `--subset code` on every command after setup. The
 [benchmark guides](docs/BENCHMARKS.md) cover each one's data, domains, and
 grading.
+
+## Ordinary tasks (fork feature)
+
+This fork also runs a plain task you own, not only a benchmark cell. Declare the task
+family in JSON — a literal executor argv with no implicit shell, a declared answer file,
+an optional independent judge, and one editor model — and the same native
+Propose–Probe–Compose, selection, reflection and post-selection judging run against it.
+Nothing in `harness2/core`, `harness2/substrate` or `harness2/benchmarks` changes.
+
+```bash
+harness2-ordinary --manifest examples/ordinary-task/manifest.json \
+  --output runs/ordinary-1 --k 1 --modes parallel
+```
+
+Editor isolation follows the launcher: `service` inherits the installed shared service's
+XDG data/state (so parallel calls resolve the one running service), while `standalone`
+gets an ephemeral per-call XDG root outside the evidence tree. Either way each call keeps
+its own native session label, workspace and receipts. `report.json` also carries an
+`editor_health` block read from
+the editor exit receipts: if every editor call of a task failed, the task is reported
+degraded and the CLI exits `1` even when the native status is `ok`.
+
+Each invocation needs a fresh `--output`; there is no resume or cache reuse. See
+[docs/ORDINARY_TASKS.md](docs/ORDINARY_TASKS.md) for the manifest schema, the executor,
+editor and judge contracts, and the honest limits: the declared executor model is not
+verified, the editor permission fence is not an OS sandbox, an unmeasured cost is
+`null`, and at `k=1` selection among the finals is not a measured improvement over the
+base harness.
 
 ## Experiments
 
