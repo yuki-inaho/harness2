@@ -36,8 +36,10 @@ continuation. Within one run, an executor call is idempotent for the same immuta
 identity (manifest, task, source, base harness, expanded argv, timeouts, editor
 settings); it is never reused across runs.
 
-Exit codes: `0` every task finished, `1` at least one task did not, `2` misconfiguration
-(manifest, arguments or output directory).
+Exit codes: `0` every task finished, `1` at least one task did not — including a task
+whose native status is `ok` while every editor call failed or no editor receipt exists (see
+[Editor health](#editor-health)) — `2` misconfiguration (manifest, arguments or output
+directory).
 
 ## Manifest (schema 1)
 
@@ -128,10 +130,22 @@ not claim otherwise.
 The editor is the installed OpenCode CLI (verified against 2.1): `opencode run --auto
 --format json --model provider/model#variant --title <label> --file MISSION.md <message>`,
 with no `--dir` and no `--variant`, and the workspace as `cwd`. Each call gets a fresh
-native session, its own XDG data/state directories, and `OPENCODE_PERMISSION` limiting
-external directory reads to that workspace. Receipts are written under
-`<output>/audit/sessions/<label>/`: `start.json`, `process.json`, `events.jsonl`,
-`stderr.log`, `exit.json`.
+native session, its own workspace, its own `--title` label and its own receipts
+(`start.json`, `process.json`, `events.jsonl`, `stderr.log`, `exit.json`) under
+`<output>/audit/sessions/<label>/`.
+
+Environment isolation follows the launcher, and `start.json` records it as
+`env_keys_set` plus `xdg_isolation`:
+
+| Launcher | XDG data/state | Why |
+|---|---|---|
+| `service` (default) | Inherited from the invoking environment (`inherited_shared_service`) | The client must resolve the already-running shared OpenCode service. Overriding `XDG_DATA_HOME`/`XDG_STATE_HOME` per call made every client try to start its own managed service on the one fixed global port, so parallel native calls failed against each other and the running service. |
+| `standalone` | Per call, under `<output>/audit/sessions/<label>/.xdg/` (`per_call`) | A standalone run starts its own local process, so its database and state are kept out of the shared install. |
+
+In both modes the adapter sets only `PWD` and `OPENCODE_PERMISSION`, which limits
+external directory reads to that workspace. It never changes the global OpenCode
+configuration, the service port, credentials or the provider, and it never switches
+launcher or model on its own.
 
 A startup deadline is enforced separately from the wall-clock deadline, so "no event
 yet" is distinguishable from "slow but working". A timeout, a non-zero exit, or an
@@ -147,6 +161,29 @@ adapter does not claim the limit was enforced.
 Cost is summed from `step_finish.part.cost` when the CLI reports it. If any session did
 not, `report.json` reports `cost_usd: null` with `cost_source: "unmeasured"`; an
 unmeasured session is never counted as zero.
+
+## Editor health
+
+Native task status and editor health are separate facts. The native stage loop can
+finish — selection and reflection included — by falling back to the base harness while
+no editor call succeeded, so a green `status` alone does not mean the editor worked.
+
+`report.json` therefore carries `editor_health` (whole run) and, per task,
+`integration.editor_health` plus `integration.fallback_labels`, computed from the
+`exit.json` receipts of that task's own calls:
+
+```json
+{"n_sessions": 8, "n_failed": 8, "n_succeeded": 0, "state": "all_failed",
+ "degraded": true, "failed_labels": ["inv1.a1"], "succeeded_labels": []}
+```
+
+`state` is `no_calls`, `all_failed`, `partial` or `all_succeeded`. `all_failed` marks
+the task degraded: the adapter reports it, lists it under `degraded_tasks`, prints it on
+stderr, and the CLI exits `1` even though the native `status` is `ok`. A `partial`
+state stays distinct and is not called degraded. For the real editor proposer, an `ok`
+native status with `no_calls` is also degraded because it has no editor evidence. The native `status` field is left
+untouched, and a judged delta measured while `all_failed` is not a tested model effect
+— no editor work produced it.
 
 ## Judge contract
 
@@ -184,15 +221,20 @@ answers are never copied into editor or solver evidence.
   editor settings (`configured_match`); otherwise it is `null`. This is not a claim
   about real-world comparability, and the executor's internals remain opaque.
 - Failure, a tie, `KEEP_BASE` and "no observed effect" are results and are preserved.
+- `editor_health` is derived from the editor's own `exit.json` receipts. A task in state
+  `all_failed` is reported as degraded and exits `1`; its native `status` and fallback
+  labels are never presented as editor success.
 
 ## Limits
 
 - A fresh native session plus a permission fence is **not** an OS sandbox. The fence is
   a tool permission policy; it is not proof that the editor could not read outside its
   workspace.
-- In `service` mode the CLI talks to the installed background service; per-session XDG
-  data/state directories are set, but full database isolation is not guaranteed and is
-  not claimed.
+- In `service` mode the CLI talks to the installed background service and inherits that
+  install's XDG data/state, so editor sessions share its database. Isolation between
+  calls is a fresh native session, a separate workspace, label and receipt directory —
+  not a separate database, and no stronger isolation is claimed. `standalone` keeps its
+  per-call XDG root but, like any local OpenCode process, is still not an OS sandbox.
 - The judge gate checks that an adoption record exists; it is not a lock against a
   separately written file, and its receipts live under `<runs>/judge/<task>/<run>/` so
   one task's evidence is never overwritten by another's.

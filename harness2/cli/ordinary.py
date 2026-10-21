@@ -24,7 +24,8 @@ and never touches the evidence tree.
 There is no resume: every invocation needs a FRESH output directory, and an occupied
 one is rejected before anything is written.
 
-Exit codes: 0 every task finished, 1 at least one task did not, 2 misconfiguration
+Exit codes: 0 every task finished, 1 at least one task did not (including a task whose
+editor calls all failed or whose `ok` native status has no editor receipts), 2 misconfiguration
 (manifest, arguments, or output directory).
 
     python3 -m harness2.cli.ordinary --manifest examples/ordinary-task/manifest.json \\
@@ -48,6 +49,7 @@ from ..ordinary import (
     InstalledOpenCodeProposer,
     ManifestAdapter,
     ManifestError,
+    editor_health,
     load_manifest,
 )
 from . import _common as C
@@ -87,6 +89,13 @@ NOTE_JUDGE = (
     "The judge is an ordinary local command. Only the files staged into its working "
     "directory are controlled; it is not sandboxed and can read any path the invoking "
     "user can."
+)
+NOTE_EDITOR_HEALTH = (
+    "`integration.editor_health` reads the editor exit receipts, not the native task "
+    "status. Native selection/reflection can complete by falling back to the base harness "
+    "while every editor call failed; a task in state `all_failed`, or an `ok` task with "
+    "no editor receipts, is degraded and the run "
+    "exits 1. A judged delta measured in that state is not a tested model effect."
 )
 
 
@@ -201,6 +210,9 @@ def main(argv=None) -> int:
 
     if rows:
         core_judge.write(rows, output / "judgment.json")
+    degraded_tasks = [
+        str(row["task_id"]) for row in task_rows if (row.get("integration") or {}).get("degraded")
+    ]
     report = {
         "schema": 1,
         "name": manifest.name,
@@ -216,6 +228,8 @@ def main(argv=None) -> int:
         "editor": plan["editor"],
         "judge_enabled": bool(manifest.judge) and not args.no_judge,
         "cost": prop.cost_summary(),
+        "editor_health": editor_health(_receipts(prop)),
+        "degraded_tasks": degraded_tasks,
         "tasks": task_rows,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "notes": [
@@ -227,6 +241,7 @@ def main(argv=None) -> int:
             NOTE_STEPS,
             NOTE_RETRY,
             NOTE_JUDGE,
+            NOTE_EDITOR_HEALTH,
         ],
     }
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -234,11 +249,18 @@ def main(argv=None) -> int:
     failed = [row["task_id"] for row in task_rows if row["status"] not in ("ok", "skipped")]
     print(
         f"ordinary {manifest.name}: {len(task_rows) - len(failed)} task(s) finished, "
-        f"{len(failed)} did not. report: {output / 'report.json'}"
+        f"{len(failed)} did not, {len(degraded_tasks)} degraded. "
+        f"report: {output / 'report.json'}"
     )
     if failed:
         print(f"  unfinished: {', '.join(failed)}", file=sys.stderr)
-    return 1 if failed else 0
+    if degraded_tasks:
+        print(
+            f"  degraded (editor calls failed or no editor evidence; native status is not editor success): "
+            f"{', '.join(degraded_tasks)}",
+            file=sys.stderr,
+        )
+    return 1 if (failed or degraded_tasks) else 0
 
 
 def _run_one(
@@ -255,6 +277,7 @@ def _run_one(
     rows: list[core_judge.Scored],
 ) -> dict:
     """Run one task natively, then optionally measure base and adopted runs."""
+    before = len(_receipts(prop))
     try:
         result = schedule.run_task(
             task_id,
@@ -267,7 +290,12 @@ def _run_one(
             libraries=libraries,
         )
     except Exception as exc:
-        return {"task_id": task_id, "status": "exception", "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "task_id": task_id,
+            "status": "exception",
+            "error": f"{type(exc).__name__}: {exc}",
+            "integration": _integration(prop, before, modes, {}, status="exception"),
+        }
 
     row = {
         "task_id": task_id,
@@ -275,6 +303,7 @@ def _run_one(
         "status": result.status,
         "errors": list(result.errors),
         "modes": {},
+        "integration": _integration(prop, before, modes, result.modes, status=result.status),
     }
     base = result.base[0] if result.base else None
     for mode in modes:
@@ -325,6 +354,47 @@ def _run_one(
             }
         row["modes"][mode] = block
     return row
+
+
+def _receipts(prop: object) -> list[dict]:
+    """Editor receipts if this proposer records them; a scripted double records none."""
+    getter = getattr(prop, "session_receipts", None)
+    return list(getter()) if callable(getter) else []
+
+
+def _integration(
+    prop: object, before: int, modes: tuple[str, ...], records: dict, *, status: str
+) -> dict:
+    """Editor health for this task, from the receipts its own calls wrote.
+
+    `before` is the receipt count on entry, so a later task cannot inherit an earlier
+    task's sessions. A proposer without receipts (a scripted double) reports `no_calls`
+    rather than an implied success.
+    """
+    health = editor_health(_receipts(prop)[before:])
+    fallback: set[str] = set()
+    for mode in modes:
+        record = records.get(mode) or {}
+        fallback.update(str(label) for label in record.get("fell_back") or [])
+    missing_editor_evidence = (
+        status == "ok"
+        and isinstance(prop, InstalledOpenCodeProposer)
+        and health["state"] == "no_calls"
+    )
+    degraded = bool(health["degraded"] or missing_editor_evidence)
+    return {
+        "editor_health": health,
+        "fallback_labels": sorted(fallback),
+        "degraded": degraded,
+        "reason": (
+            "no editor calls were recorded despite native status ok"
+            if missing_editor_evidence
+            else "every editor call failed (see the session exit.json receipts); native "
+            "status and fallback labels are not editor success"
+            if degraded
+            else ""
+        ),
+    }
 
 
 def _scored(

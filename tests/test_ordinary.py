@@ -25,12 +25,14 @@ import contextlib
 import dataclasses
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from harness2.cli import ordinary as ordinary_cli
 from harness2.core import context, judge, schedule
@@ -42,6 +44,7 @@ from harness2.ordinary import (
     InstalledOpenCodeProposer,
     ManifestAdapter,
     ManifestError,
+    editor_health,
     load_manifest,
 )
 
@@ -914,6 +917,155 @@ class InstalledCliTests(Base):
         )
         self.assertEqual(exit_record["returncode"], 0)
         self.assertIn("error event", exit_record["error"])
+
+    def test_service_inherits_the_installed_xdg_and_standalone_isolates_it(self):
+        fake = self.write_cli(
+            "opencode-env",
+            "#!/usr/bin/env python3\n"
+            "import json, os, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "label = args[args.index('--title') + 1] if '--title' in args else 'x'\n"
+            "cap = pathlib.Path(os.environ['H2_TEST_ENV_CAPTURE'])\n"
+            "cap.mkdir(parents=True, exist_ok=True)\n"
+            "(cap / (label.replace('.', '_') + '.json')).write_text(json.dumps({\n"
+            "    'XDG_DATA_HOME': os.environ.get('XDG_DATA_HOME'),\n"
+            "    'XDG_STATE_HOME': os.environ.get('XDG_STATE_HOME'),\n"
+            "    'PWD': os.environ.get('PWD'),\n"
+            "    'OPENCODE_PERMISSION': os.environ.get('OPENCODE_PERMISSION'),\n"
+            "}))\n"
+            "out = pathlib.Path('output')\n"
+            "out.mkdir(exist_ok=True)\n"
+            "(out / 'answer.md').write_text('env captured\\n')\n",
+        )
+        installed = self.tmp / "installed"
+        capture = self.tmp / "capture"
+        env = {
+            "XDG_DATA_HOME": str(installed / "data"),
+            "XDG_STATE_HOME": str(installed / "state"),
+            "H2_TEST_ENV_CAPTURE": str(capture),
+        }
+        spec = ChannelSpec("opencode", "example/model#high", steps=40, timeout=60)
+        with mock.patch.dict(os.environ, env):
+            service = InstalledOpenCodeProposer(
+                spec,
+                audit_dir=self.tmp / "audit",
+                launcher="service",
+                startup_timeout_s=10,
+                cli=str(fake),
+            )
+            self.assertTrue(service.call("Do it.", None, "svc1", max_attempts=1).ok)
+            standalone = InstalledOpenCodeProposer(
+                spec,
+                audit_dir=self.tmp / "audit",
+                launcher="standalone",
+                startup_timeout_s=10,
+                cli=str(fake),
+            )
+            self.assertTrue(standalone.call("Do it.", None, "std1", max_attempts=1).ok)
+
+        service_env = json.loads((capture / "svc1.json").read_text())
+        self.assertEqual(service_env["XDG_DATA_HOME"], str(installed / "data"))
+        self.assertEqual(service_env["XDG_STATE_HOME"], str(installed / "state"))
+        self.assertIn("external_directory", json.loads(service_env["OPENCODE_PERMISSION"]))
+        service_start = json.loads(
+            (self.tmp / "audit" / "sessions" / "svc1" / "start.json").read_text()
+        )
+        self.assertEqual(service_start["env_keys_set"], ["PWD", "OPENCODE_PERMISSION"])
+        self.assertEqual(service_start["xdg_isolation"], "inherited_shared_service")
+
+        standalone_env = json.loads((capture / "std1.json").read_text())
+        session_xdg = self.tmp / "audit" / "sessions" / "std1" / ".xdg"
+        self.assertEqual(standalone_env["XDG_DATA_HOME"], str(session_xdg / "data"))
+        self.assertEqual(standalone_env["XDG_STATE_HOME"], str(session_xdg / "state"))
+        self.assertNotEqual(standalone_env["XDG_DATA_HOME"], service_env["XDG_DATA_HOME"])
+        standalone_start = json.loads(
+            (self.tmp / "audit" / "sessions" / "std1" / "start.json").read_text()
+        )
+        self.assertEqual(
+            standalone_start["env_keys_set"],
+            ["PWD", "OPENCODE_PERMISSION", "XDG_DATA_HOME", "XDG_STATE_HOME"],
+        )
+        self.assertEqual(standalone_start["xdg_isolation"], "per_call")
+
+        self.assertNotEqual(service_start["label"], standalone_start["label"])
+        self.assertEqual(service.health()["state"], "all_succeeded")
+        self.assertEqual(standalone.health()["n_sessions"], 1)
+
+
+class DegradedRunTests(Base):
+    """An all-editor-fail run must not look green just because native status is `ok`."""
+
+    def test_health_states_keep_partial_success_distinct_from_all_failed(self):
+        ok = {"label": "ok1", "error": ""}
+        bad = {"label": "bad1", "error": "rc=1: port in use"}
+        empty = editor_health([])
+        self.assertEqual((empty["state"], empty["degraded"]), ("no_calls", False))
+        all_ok = editor_health([ok])
+        self.assertEqual((all_ok["state"], all_ok["degraded"]), ("all_succeeded", False))
+        partial = editor_health([ok, bad])
+        self.assertEqual((partial["state"], partial["degraded"]), ("partial", False))
+        self.assertEqual((partial["n_sessions"], partial["n_failed"]), (2, 1))
+        self.assertEqual(partial["failed_labels"], ["bad1"])
+        all_bad = editor_health([bad])
+        self.assertEqual((all_bad["state"], all_bad["degraded"]), ("all_failed", True))
+
+    def test_every_editor_call_failing_is_reported_degraded_and_exits_nonzero(self):
+        failing = self.write_cli(
+            "opencode-always-fails",
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "print(json.dumps({'type': 'error', 'error': {'name': 'ServiceError', "
+            "'data': {'message': 'Managed service port is already in use'}}}))\n"
+            "raise SystemExit(1)\n",
+        )
+        output = self.tmp / "degraded"
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("shutil.which", return_value=str(failing)):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = ordinary_cli.main(
+                    [
+                        "--manifest",
+                        str(self.manifest_path),
+                        "--output",
+                        str(output),
+                        "--k",
+                        "1",
+                        "--modes",
+                        "parallel",
+                    ]
+                )
+        self.assertEqual(code, 1, "all-editor-fail must not exit 0")
+        self.assertIn("1 degraded", out.getvalue())
+        self.assertIn("degraded (editor calls failed", err.getvalue())
+        report = json.loads((output / "report.json").read_text())
+        row = report["tasks"][0]
+        self.assertEqual(row["status"], "ok", "native status is kept as its own fact")
+        self.assertEqual(row["errors"], [])
+        health = row["integration"]["editor_health"]
+        self.assertEqual((health["n_sessions"], health["n_failed"]), (8, 8))
+        self.assertEqual(health["n_succeeded"], 0)
+        self.assertEqual(health["state"], "all_failed")
+        self.assertTrue(row["integration"]["degraded"])
+        self.assertTrue(row["integration"]["fallback_labels"])
+        self.assertEqual(report["degraded_tasks"], ["notes-1"])
+        self.assertEqual(report["editor_health"]["state"], "all_failed")
+        self.assertIn("degraded", "\n".join(report["notes"]))
+        receipts = sorted((output / "audit" / "sessions").glob("*/exit.json"))
+        self.assertEqual(len(receipts), 8)
+        for receipt in receipts:
+            self.assertTrue(json.loads(receipt.read_text())["error"])
+
+    def test_ok_without_editor_receipts_is_degraded_for_real_proposer(self):
+        spec = ChannelSpec("opencode", "example/model#high", steps=40, timeout=60)
+        proposer = InstalledOpenCodeProposer(
+            spec, audit_dir=self.tmp / "audit", launcher="service", startup_timeout_s=10
+        )
+        integration = ordinary_cli._integration(
+            proposer, 0, ("agg",), {}, status="ok"
+        )
+        self.assertEqual(integration["editor_health"]["state"], "no_calls")
+        self.assertTrue(integration["degraded"])
+        self.assertIn("no editor calls", integration["reason"])
 
 
 if __name__ == "__main__":

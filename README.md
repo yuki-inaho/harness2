@@ -151,6 +151,13 @@ harness2-ordinary --manifest examples/ordinary-task/manifest.json \
   --output runs/ordinary-1 --k 1 --modes parallel
 ```
 
+Editor isolation follows the launcher: `service` inherits the installed shared service's
+XDG data/state (so parallel calls resolve the one running service), while `standalone`
+gets a per-call XDG root. Either way each call keeps its own native session label,
+workspace and receipts. `report.json` also carries an `editor_health` block read from
+the editor exit receipts: if every editor call of a task failed, the task is reported
+degraded and the CLI exits `1` even when the native status is `ok`.
+
 Each invocation needs a fresh `--output`; there is no resume or cache reuse. See
 [docs/ORDINARY_TASKS.md](docs/ORDINARY_TASKS.md) for the manifest schema, the executor,
 editor and judge contracts, and the honest limits: the declared executor model is not

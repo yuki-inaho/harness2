@@ -111,6 +111,15 @@ _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _SAFE_LABEL = re.compile(r"[^A-Za-z0-9_.-]+")
 
+# Environment the adapter sets for every editor launch, and the extra keys that only a
+# `standalone` launch gets. `service` deliberately inherits the invoking environment --
+# including the installed CLI's `XDG_DATA_HOME`/`XDG_STATE_HOME` -- because the client
+# has to resolve the already-running shared service. Overriding those per call made each
+# client try to start its own managed service on the one fixed global port, so parallel
+# native calls collided with each other and with the running service.
+EDITOR_ENV_BASE = ("PWD", "OPENCODE_PERMISSION")
+EDITOR_ENV_XDG = ("XDG_DATA_HOME", "XDG_STATE_HOME")
+
 
 class ManifestError(ValueError):
     """The manifest is not usable. Raised before any run directory is written."""
@@ -951,14 +960,77 @@ def _parse_judgment(doc: Any, where: Path) -> dict:
     }
 
 
+def editor_env(
+    cwd: Path, session: Path, launcher: str, base: Mapping[str, str] | None = None
+) -> tuple[dict[str, str], list[str]]:
+    """The exact environment for one editor launch, and the keys the adapter itself set.
+
+    `service` inherits the invoking environment so the CLI talks to the installed shared
+    background service through its own XDG data/state; the adapter only pins `PWD` and
+    the permission fence. `standalone` starts its own local process and gets a per-call
+    XDG root, which keeps its database and state out of the shared install.
+    """
+    env = dict(os.environ if base is None else base)
+    env["PWD"] = str(cwd)
+    env["OPENCODE_PERMISSION"] = json.dumps(
+        {
+            "external_directory": {
+                "*": "deny",
+                str(cwd): "allow",
+                f"{cwd}/**": "allow",
+            },
+            "webfetch": "deny",
+            "websearch": "deny",
+        }
+    )
+    keys = list(EDITOR_ENV_BASE)
+    if launcher == "standalone":
+        env["XDG_DATA_HOME"] = str(session / ".xdg" / "data")
+        env["XDG_STATE_HOME"] = str(session / ".xdg" / "state")
+        keys += list(EDITOR_ENV_XDG)
+    return env, keys
+
+
+def editor_health(receipts: Sequence[Mapping[str, Any]]) -> dict:
+    """Summarise actual editor exit receipts; native task status is a separate fact.
+
+    A session counts as failed when its `exit.json` carries a non-empty `error` (timeout,
+    non-zero exit, `error` event, or an empty reply). "Every call failed" is the state
+    that a green native status must not hide: selection/reflection can still complete by
+    falling back to the base harness while no editor work succeeded.
+    """
+    items = [dict(item) for item in receipts]
+    failed = [item for item in items if str(item.get("error") or "").strip()]
+    succeeded = [item for item in items if not str(item.get("error") or "").strip()]
+    total = len(items)
+    if total == 0:
+        state = "no_calls"
+    elif not succeeded:
+        state = "all_failed"
+    elif failed:
+        state = "partial"
+    else:
+        state = "all_succeeded"
+    return {
+        "n_sessions": total,
+        "n_failed": len(failed),
+        "n_succeeded": len(succeeded),
+        "state": state,
+        "degraded": state == "all_failed",
+        "failed_labels": [str(item.get("label") or "") for item in failed],
+        "succeeded_labels": [str(item.get("label") or "") for item in succeeded],
+    }
+
+
 class InstalledOpenCodeProposer(Proposer):
     """Native `Proposer` with only the editor launch replaced by the installed OpenCode CLI.
 
     Retries, audit files, call fingerprints and `harvest="context/harness"` stay native.
-    One session per call: its own workspace, its own native session, its own XDG data/state
-    directories, and its own receipts (`start.json`, `process.json`, `exit.json`,
-    `events.jsonl`). A failed launch is reported as a failure; it never silently switches
-    launcher or model.
+    One session per call: its own workspace, its own native session label and its own
+    receipts (`start.json`, `process.json`, `exit.json`, `events.jsonl`). Environment
+    isolation follows the launcher: `service` inherits the installed shared service's
+    XDG data/state, `standalone` gets a per-call XDG root. A failed launch is reported as
+    a failure; it never silently switches launcher or model.
     """
 
     def __init__(
@@ -980,6 +1052,8 @@ class InstalledOpenCodeProposer(Proposer):
         self._tls = threading.local()
         self._costs: list[float | None] = []
         self._costs_lock = threading.Lock()
+        self._sessions: list[dict] = []
+        self._sessions_lock = threading.Lock()
 
     def call(self, mission, context_dir, label, **kwargs):  # type: ignore[override]
         self._tls.label = label
@@ -1034,21 +1108,7 @@ class InstalledOpenCodeProposer(Proposer):
         session.mkdir(parents=True, exist_ok=True)
 
         argv = self.argv_for(label)
-        env = dict(os.environ)
-        env["PWD"] = str(cwd)
-        env["XDG_DATA_HOME"] = str(session / ".xdg" / "data")
-        env["XDG_STATE_HOME"] = str(session / ".xdg" / "state")
-        env["OPENCODE_PERMISSION"] = json.dumps(
-            {
-                "external_directory": {
-                    "*": "deny",
-                    str(cwd): "allow",
-                    f"{cwd}/**": "allow",
-                },
-                "webfetch": "deny",
-                "websearch": "deny",
-            }
-        )
+        env, env_keys = editor_env(cwd, session, self.launcher)
         (session / "start.json").write_text(
             json.dumps(
                 {
@@ -1062,12 +1122,10 @@ class InstalledOpenCodeProposer(Proposer):
                     "launcher": self.launcher,
                     "startup_timeout_s": self.startup_timeout_s,
                     "wall_timeout_s": wall,
-                    "env_keys_set": [
-                        "PWD",
-                        "XDG_DATA_HOME",
-                        "XDG_STATE_HOME",
-                        "OPENCODE_PERMISSION",
-                    ],
+                    "env_keys_set": env_keys,
+                    "xdg_isolation": (
+                        "per_call" if self.launcher == "standalone" else "inherited_shared_service"
+                    ),
                 },
                 indent=2,
             )
@@ -1133,9 +1191,35 @@ class InstalledOpenCodeProposer(Proposer):
         )
         with self._costs_lock:
             self._costs.append(cost)
+        receipt = str(session / "exit.json")
+        if self.audit_dir:
+            try:
+                receipt = str((session / "exit.json").relative_to(self.audit_dir))
+            except (TypeError, ValueError):
+                pass
+        with self._sessions_lock:
+            self._sessions.append(
+                {
+                    "label": label,
+                    "receipt": receipt,
+                    "error": error,
+                    "timed_out": bool(result["timed_out"]),
+                    "returncode": result["returncode"],
+                    "answered": bool(chosen.strip()),
+                }
+            )
         if error:
             return "", cost or 0.0, error
         return chosen, cost or 0.0, ""
+
+    def session_receipts(self) -> list[dict]:
+        """One entry per editor call, mirroring the `exit.json` each call wrote."""
+        with self._sessions_lock:
+            return [dict(item) for item in self._sessions]
+
+    def health(self) -> dict:
+        """Editor health for every call this proposer made, from its own receipts."""
+        return editor_health(self.session_receipts())
 
     def _session_dir(self, label: str, cwd: Path) -> Path:
         """A per-call receipt directory: a retry of the same label must not erase the first."""
