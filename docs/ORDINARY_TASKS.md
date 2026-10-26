@@ -5,8 +5,10 @@ additive path for a *plain* task you own: declare the task family in JSON, and t
 native Propose–Probe–Compose, selection, reflection and post-selection judging run
 against it.
 
-Nothing in `harness2/core`, `harness2/substrate` or `harness2/benchmarks` is modified
-for this feature. `ManifestAdapter` satisfies the existing adapter seam, and
+The ordinary-task adapter does not require changes in `harness2/core`,
+`harness2/substrate` or `harness2/benchmarks`. Separately, this fork's shared
+authoring/reflection prompts include guidance on process cost and usable results
+(prompt version `harness2-2`). `ManifestAdapter` satisfies the existing adapter seam, and
 `InstalledOpenCodeProposer` changes only the editor launch.
 
 ## Quick start
@@ -247,3 +249,32 @@ answers are never copied into editor or solver evidence.
 - A timeout kills only children that remain in the process group the adapter owns; a
   descendant that calls `setsid` or daemonizes is outside it and can survive.
 - The example models and labels are synthetic placeholders, not a recommendation.
+
+
+## Evaluating workflow overhead
+
+For workflow edits, preserve correctness and authorization first; compare speed
+only among valid outcomes. Use actual artifacts and trajectory timestamps, not
+checklist completion or text matches in a skill. Useful observations are time to
+the first usable result, delivered outcomes, repeated checks, and time spent
+waiting on unnecessary supervisor exchanges. Missing timing remains unknown.
+The shared authoring/reflection guidance is a prompt change, not evidence that
+agents will behave better. Existing scripted-editor tests verify integration,
+not a live-model speedup. Do not run improvement probes as an extra prerequisite
+to an unrelated user's already-authorized job.
+
+Use paired synthetic cases for a future controlled baseline/candidate probe:
+
+| Situation | Behavior to check in the execution |
+|---|---|
+| Valid inputs, authorized run, user asks for no workdoc | Produce the requested output without an invented document or GO gate. |
+| A worker is in an active tool call when a nonurgent ACK is delayed | Let it continue; confirm delivery at a tool boundary without replacing it merely for lateness. |
+| Receipt wording is wrong but underlying inputs and outputs are unchanged | Correct the receipt; retain valid execution evidence. |
+| Input alignment or evaluation split is actually wrong | Stop the affected run and repair the validity problem before proceeding. |
+| A timed-out frontend may still own a running job | Reconcile process and output state before launching a duplicate. |
+| The user explicitly stops remote work | Do not resume remote control while making local improvements. |
+
+These are evaluation scenarios, not completed results or keyword assertions.
+Keep expected behavior on the evaluation side of a probe. Fix source, model,
+budget, inputs and environment for comparisons; report failures and confounding
+changes. Claim generalization only with independent evidence.

@@ -27,12 +27,26 @@ from dataclasses import dataclass
 from .spec import BenchPrompts
 from .tree import SurfaceSpec
 
-VERSION = "harness2-1"
+VERSION = "harness2-2"
 
 
 def _tidy(text: str) -> str:
     """Collapse blank runs left by an empty optional slot."""
     return re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
+
+
+PROCESS_COST = """\
+# PROCESS COST AND USABLE RESULTS
+
+When trajectories show process delaying a valid requested result, prefer removing or merging
+redundant checks, approval waits and recordkeeping before adding another rule. Preserve the
+user's scope, explicit stop requests, required authorization and checks that prevent invalid
+inputs, destructive effects or duplicate jobs. Ordinary reversible repairs within an authorized
+assignment do not need invented per-step approvals. Revalidate affected evidence, not unchanged
+work. Respect explicitly requested documentation and audit detail. Checklist counts or polished
+reports do not substitute for the requested deliverable. Compare valid outcomes first, then
+recorded time to the first usable result and process delays; if timing is absent, leave it
+unknown. Do not invent savings or new universal deadlines from one trajectory."""
 
 
 ANSWER_FREE = """\
@@ -695,6 +709,7 @@ def _tts_propose(bp: BenchPrompts, dim: str, st: _SurfaceText, *, k: int, index:
         f"library of what was adopted for earlier tasks.",
         _work(bp),
         _lens(bp),
+        PROCESS_COST,
         block,
         _TTS_GENERALIZE.format(
             domain_word=bp.domain_word, DOMAIN_WORD_UPPER=bp.domain_word.upper()
@@ -718,6 +733,7 @@ def _tts_aggregate(bp: BenchPrompts, st: _SurfaceText, *, k: int, index: int) ->
         "launder it.",
         _work(bp),
         _lens(bp),
+        PROCESS_COST,
         f"# WHAT YOU HAVE\n\n"
         f"{k} rollout{'s' if k > 1 else ''} of this task under the unmodified (base) harness, "
         f"and {n} dimension-scoped candidate harnesses built on that same base -- {k} on the "
@@ -880,6 +896,7 @@ def propose(
         "You are adapting an autonomous agent's harness.",
         _work(bp),
         _lens(bp),
+        PROCESS_COST,
         block,
         GENERALIZE.format(domain_word=bp.domain_word, DOMAIN_WORD_UPPER=bp.domain_word.upper()),
         "\n".join(how),
@@ -905,6 +922,7 @@ def aggregate(bp: BenchPrompts, surface: SurfaceSpec | str, *, k: int = 1, index
                 "are the last gate, and merging an edit launders it.",
                 _work(bp),
                 _lens(bp),
+                PROCESS_COST,
                 f"# WHAT YOU HAVE\n\n"
                 f"{k} rollout{'s' if k > 1 else ''} under the unmodified harness, and {n} candidate "
                 f"harnesses -- {k} on the INV dimension (how the agent works) and {k} on the DOM "
@@ -971,6 +989,7 @@ def compose_round(bp: BenchPrompts, surface: SurfaceSpec | str, *, t: int, k: in
                 f"You are composing checkpoint {t} of {k} in a sequential adaptation loop.",
                 _work(bp),
                 _lens(bp),
+                PROCESS_COST,
                 "# WHAT YOU HAVE\n\n"
                 "The rollouts under the unmodified harness (the shared evidence, which does not change "
                 "between rounds), this round's INV and DOM candidates with their rollouts, and every "
@@ -1113,6 +1132,7 @@ def experience(bp: BenchPrompts) -> str:
                 "area reads before it makes its own edits.",
                 _work(bp),
                 _lens(bp),
+                PROCESS_COST,
                 "# THE ADOPTED CANDIDATE IS NOT THE ONLY EVIDENCE\n\n"
                 "Selection compared DELIVERABLES with the harnesses hidden, so the choice says which "
                 "output read best -- not which edit worked. Treat every candidate as evidence. An edit "
