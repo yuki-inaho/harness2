@@ -12,6 +12,19 @@ selection, reflection and judging to `harness2/core`, and
 onto those shared code paths are listed in
 [docs/UPSTREAM_FIXES.md](UPSTREAM_FIXES.md).
 
+## Keep delivery and optimization distinct
+
+When the primary task is to produce an artifact, run the smallest real input
+through the existing executor first. A native optimization run is not a
+prerequisite for ordinary authorized work. Use this adapter when harness
+comparison itself is required and its inputs and conditions can be fixed.
+
+A narrow instruction correction based on an observed failure may be recorded
+without running optimization, but must be described as an unmeasured workflow
+change. Report actual delivered artifacts separately from setup and record
+keeping; neither a selected candidate nor a completed checklist proves a
+quality or speed improvement.
+
 ## Quick start
 
 ```bash
