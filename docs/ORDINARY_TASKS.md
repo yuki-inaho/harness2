@@ -151,6 +151,14 @@ limits external directory reads to that workspace. It never changes the global O
 configuration, the service port, credentials or the provider, and it never switches
 launcher or model on its own.
 
+The installed OpenCode 2.2.5 client ignores `OPENCODE_PERMISSION` for its `shell` tool.
+`InstalledOpenCodeProposer` therefore also writes a project `opencode.json` in the
+editor workspace with `shell`, `bash`, `task`, `webfetch`, `websearch`, and
+`external_directory` denied. This is still a tool-permission policy, not an OS sandbox:
+the shared service process keeps the invoking user's environment, and the model could
+still reach it if a tool were misconfigured. Verify the editor's `events.jsonl` contains
+no `shell`/`bash` calls before trusting a run.
+
 A startup deadline is enforced separately from the wall-clock deadline, so "no event
 yet" is distinguishable from "slow but working". A timeout, a non-zero exit, or an
 `error` event is a failure. The launcher is never switched automatically. The adapter
@@ -235,7 +243,8 @@ answers are never copied into editor or solver evidence.
 
 - A fresh native session plus a permission fence is **not** an OS sandbox. The fence is
   a tool permission policy; it is not proof that the editor could not read outside its
-  workspace.
+  workspace. This applies to both `OPENCODE_PERMISSION` and the project
+  `opencode.json` fence written into the editor workspace for OpenCode 2.2.5.
 - In `service` mode the CLI talks to the installed background service and inherits that
   install's XDG data/state, so editor sessions share its database. Isolation between
   calls is a fresh native session, a separate workspace, label and receipt directory —

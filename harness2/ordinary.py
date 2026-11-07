@@ -1101,6 +1101,26 @@ class InstalledOpenCodeProposer(Proposer):
 
     def _opencode(self, cwd: Path, mission: str, system: str, wall: int) -> tuple[str, float, str]:
         cwd = Path(cwd)
+        # The installed OpenCode 2.2.5 ignores OPENCODE_PERMISSION for the shell tool.
+        # A project config is honoured, so put the fence in the editor workspace itself.
+        # This is a tool-permission policy, not an OS sandbox; see docs/ORDINARY_TASKS.md.
+        (cwd / "opencode.json").write_text(
+            json.dumps(
+                {
+                    "$schema": "https://opencode.ai/config.json",
+                    "permission": {
+                        "*": "allow",
+                        "external_directory": "deny",
+                        "shell": "deny",
+                        "bash": "deny",
+                        "task": "deny",
+                        "webfetch": "deny",
+                        "websearch": "deny",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
         (cwd / "output").mkdir(parents=True, exist_ok=True)
         (cwd / "MISSION.md").write_text(
             (f"{system}\n\n---\n\n" if system else "") + mission, encoding="utf-8"

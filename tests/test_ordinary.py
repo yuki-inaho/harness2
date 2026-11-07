@@ -841,6 +841,32 @@ class InstalledCliTests(Base):
         )
         self.assertEqual(standalone.argv_for("x")[2], "--standalone")
 
+    def test_editor_workspace_gets_a_shell_deny_opencode_config(self):
+        fake = self.write_cli(
+            "opencode-config",
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib\n"
+            "out = pathlib.Path('output')\n"
+            "out.mkdir(exist_ok=True)\n"
+            "(out / 'answer.md').write_text(pathlib.Path('opencode.json').read_text())\n"
+            "print(json.dumps({'type': 'step_finish', "
+            "'part': {'type': 'step_finish', 'cost': 0.0}}))\n",
+        )
+        prop = InstalledOpenCodeProposer(
+            ChannelSpec("opencode", "example/model#high", steps=40, timeout=60),
+            audit_dir=self.tmp / "audit",
+            launcher="service",
+            startup_timeout_s=10,
+            cli=str(fake),
+        )
+        reply = prop.call("Do the task.", None, "inv1.a1", max_attempts=1)
+        self.assertTrue(reply.ok)
+        config = json.loads(reply.text)
+        self.assertEqual(config["permission"]["shell"], "deny")
+        self.assertEqual(config["permission"]["bash"], "deny")
+        self.assertEqual(config["permission"]["task"], "deny")
+        self.assertEqual(config["permission"]["external_directory"], "deny")
+
     def test_a_real_exit_is_recorded_and_cost_is_reported(self):
         fake = self.write_cli(
             "opencode-ok",
