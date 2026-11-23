@@ -654,8 +654,8 @@ class ManifestAdapter:
         identity = self._identity(task_id, harness_src, run_id, wall, argv, run_dir)
         recorded = _read_json(run_dir / "completion.json")
         if recorded and recorded.get("identity") == identity:
-            if self._answer(run_dir).is_file():
-                return run_dir
+            self.verified_answer_bytes(run_dir)
+            return run_dir
 
         shutil.rmtree(run_dir, ignore_errors=True)
         task_copy = run_dir / "input" / "task"
@@ -695,7 +695,8 @@ class ManifestAdapter:
             stderr_path=run_dir / "stderr.log",
         )
         answer = self._answer(run_dir)
-        answer_ok = answer.is_file() and bool(answer.read_bytes().strip())
+        answer_bytes = answer.read_bytes() if answer.is_file() else b""
+        answer_ok = bool(answer_bytes.strip())
         stderr_tail = _tail(run_dir / "stderr.log", 600)
         error = ""
         if result["timed_out"]:
@@ -713,7 +714,7 @@ class ManifestAdapter:
                     "answer": self.manifest.answer,
                     "answer_present": answer_ok,
                     "answer_sha256": (
-                        hashlib.sha256(answer.read_bytes()).hexdigest() if answer_ok else None
+                        hashlib.sha256(answer_bytes).hexdigest() if answer_ok else None
                     ),
                     "stderr_tail": stderr_tail,
                     "error": error,
@@ -734,6 +735,52 @@ class ManifestAdapter:
     def delivered(self, run_dir: Path) -> bool:
         answer = self._answer(Path(run_dir))
         return answer.is_file() and bool(answer.read_bytes().strip())
+
+    def verified_answer_bytes(self, run_dir: Path) -> bytes:
+        """Read one answer snapshot and check it against its successful executor receipt.
+
+        Callers must stage these bytes, not reopen the source after this check. This
+        detects later edits or missing evidence; it is not a signature or an OS sandbox.
+        """
+        run_dir = Path(run_dir)
+        receipt_path = run_dir / "exit.json"
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"answer integrity: cannot read executor receipt {receipt_path}: {exc}"
+            ) from exc
+        if (
+            not isinstance(receipt, dict)
+            or type(receipt.get("schema")) is not int
+            or receipt.get("schema") != 1
+            or receipt.get("answer") != self.manifest.answer
+            or receipt.get("answer_present") is not True
+            or type(receipt.get("returncode")) is not int
+            or receipt.get("returncode") != 0
+            or receipt.get("timed_out") is not False
+            or receipt.get("error") != ""
+        ):
+            raise RuntimeError(
+                f"answer integrity: invalid successful executor receipt {receipt_path}"
+            )
+        expected = receipt.get("answer_sha256")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise RuntimeError(f"answer integrity: invalid answer_sha256 in {receipt_path}")
+        answer = self._answer(run_dir)
+        try:
+            body = answer.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(f"answer integrity: cannot read {answer}: {exc}") from exc
+        if not body.strip():
+            raise RuntimeError(f"answer integrity: answer is empty: {answer}")
+        actual = hashlib.sha256(body).hexdigest()
+        if actual != expected:
+            raise RuntimeError(
+                f"answer integrity: answer_sha256 mismatch for {answer}; "
+                f"recorded {expected}, found {actual}"
+            )
+        return body
 
     def trajectory(self, run_dir: Path, *, obs_trunc: int) -> str:
         run_dir = Path(run_dir)
@@ -778,8 +825,7 @@ class ManifestAdapter:
             )
 
         answer_src = self._answer(Path(run_dir))
-        if not (answer_src.is_file() and answer_src.read_bytes().strip()):
-            raise RuntimeError(f"nothing to judge: {answer_src} is missing or empty")
+        answer_bytes = self.verified_answer_bytes(run_dir)
 
         judge_dir = self.runs_root / "judge" / task_id / _slug(Path(run_dir).name)
         shutil.rmtree(judge_dir, ignore_errors=True)
@@ -788,7 +834,7 @@ class ManifestAdapter:
         _copy_input(self._task_dir(task_id), task_copy, self.manifest.leak_globs)
         answer_copy = judge_dir / "input" / "answer" / answer_src.name
         answer_copy.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(answer_src, answer_copy)
+        answer_copy.write_bytes(answer_bytes)
 
         slots = {
             "manifest_dir": str(self.manifest.path.parent),
@@ -810,7 +856,12 @@ class ManifestAdapter:
             stderr_path=judge_dir / "stderr.log",
         )
         (judge_dir / "judge.json").write_text(
-            json.dumps({"argv": argv, **result}, indent=2) + "\n", encoding="utf-8"
+            json.dumps(
+                {"argv": argv, "answer_sha256": hashlib.sha256(answer_bytes).hexdigest(), **result},
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
         )
         if result["timed_out"]:
             raise RuntimeError(f"judge {result['timeout_kind']} after {judge.timeout_s}s")

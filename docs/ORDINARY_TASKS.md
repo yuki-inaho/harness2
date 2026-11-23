@@ -25,6 +25,10 @@ change. Report actual delivered artifacts separately from setup and record
 keeping; neither a selected candidate nor a completed checklist proves a
 quality or speed improvement.
 
+For image work, [Annotation tasks](ANNOTATION_TASKS.md) describes the boundary
+between the `annotate-images-directly` skill and this adapter, including input
+allowlists, answer freezing, reference access and metric reporting.
+
 ## Quick start
 
 ```bash
@@ -56,6 +60,9 @@ anything is written, because this CLI has no resume, cache reuse or cross-invoca
 continuation. Within one run, an executor call is idempotent for the same immutable
 identity (manifest, task, source, base harness, expanded argv, timeouts, editor
 settings); it is never reused across runs.
+Reuse checks the answer against its successful executor receipt again. A changed,
+deleted or empty answer, or an invalid receipt, raises an integrity error instead
+of returning the completed run or silently rerunning it.
 
 Exit codes: `0` every task finished, `1` at least one task did not — a failed stage
 (native status `partial` or `base-failed`, which is why `errors` is non-empty), a task
@@ -240,6 +247,21 @@ and excludes it from the denominator.
 `score()` raises unless an adoption record already exists under the task's
 `selection/` directory, so judging cannot run before selection. Judge files and expected
 answers are never copied into editor or solver evidence.
+
+Before staging an answer, the adapter requires a valid successful executor
+`exit.json` and checks its `answer_sha256` against one non-empty byte snapshot of
+the declared answer. It stages those verified bytes without reopening the source.
+The judge receipt also records the staged answer's hash. A changed, deleted or
+empty answer, a missing or malformed receipt, or a receipt describing a failed
+execution produces an explicit integrity error: core records the measurement as
+unknown, never as a successful empty prediction or `0/n`.
+
+The ordinary CLI also repeats this check before reusing an in-memory judgment.
+If it fails, the cached result and its retained judgment row become ungraded;
+the judge is not rerun. These checks detect changes relative to the local receipt.
+They do not make either file immutable or protect against a process that rewrites
+both the answer and its receipt. The checked unit is `executor.answer`, not other
+files it mentions.
 
 ## What a report may and may not claim
 
