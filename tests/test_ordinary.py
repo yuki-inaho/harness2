@@ -23,6 +23,7 @@ scripted, exactly as the upstream demo tests do.
 
 import contextlib
 import dataclasses
+import hashlib
 import io
 import json
 import os
@@ -35,6 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+from harness2 import ordinary as ordinary_module
 from harness2.cli import ordinary as ordinary_cli
 from harness2.core import context, judge, schedule
 from harness2.core.library import Library
@@ -449,6 +451,158 @@ class JudgeTests(Base):
         self.assertIn("rc=3", row.error)
 
 
+class AnswerIntegrityTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.subject = self.adapter()
+        result, _prop, _libs = self.run_k1(self.subject)
+        selection = result.selections["agg"]
+        self.record = {
+            "label": selection["chosen_label"],
+            "run_id": selection["chosen_run_id"],
+            "run_dir": selection["chosen_run_dir"],
+        }
+        self.run_dir = Path(self.record["run_dir"])
+        self.answer_path = self.run_dir / "answer.md"
+        self.receipt_path = self.run_dir / "exit.json"
+        self.answer_bytes = self.answer_path.read_bytes()
+        self.receipt_bytes = self.receipt_path.read_bytes()
+
+    def score(self):
+        return judge.judge_one(
+            self.subject,
+            "notes-1",
+            "agg",
+            1,
+            self.record["label"],
+            self.record["run_id"],
+            self.run_dir,
+        )
+
+    def assert_ungraded_without_judge(self):
+        with mock.patch("harness2.ordinary.run_bounded") as launch:
+            row = self.score()
+        launch.assert_not_called()
+        self.assertFalse(row.graded)
+        self.assertIsNone(row.frac)
+        self.assertIsNone(row.n_passed)
+        self.assertIsNone(row.n_criteria)
+        self.assertIn("answer integrity:", row.error)
+
+    def test_valid_answer_keeps_the_existing_judge_contract(self):
+        row = self.score()
+        self.assertTrue(row.graded, row.error)
+        self.assertEqual((row.n_passed, row.n_criteria, row.frac), (2, 2, 1.0))
+        judge_dir = self.subject.runs_root / "judge" / "notes-1" / self.run_dir.name
+        staged = (judge_dir / "input" / "answer" / "answer.md").read_bytes()
+        self.assertEqual(staged, self.answer_bytes)
+        receipt = json.loads((judge_dir / "judge.json").read_text())
+        self.assertEqual(receipt["answer_sha256"], hashlib.sha256(self.answer_bytes).hexdigest())
+
+    def test_staging_uses_the_verified_snapshot_without_reopening_the_source(self):
+        copy_input = ordinary_module._copy_input
+
+        def copy_then_change_answer(*args, **kwargs):
+            result = copy_input(*args, **kwargs)
+            self.answer_path.write_text("changed after verification\n", encoding="utf-8")
+            return result
+
+        with mock.patch("harness2.ordinary._copy_input", side_effect=copy_then_change_answer):
+            row = self.score()
+        self.assertTrue(row.graded, row.error)
+        self.assertEqual(row.frac, 1.0)
+        judge_dir = self.subject.runs_root / "judge" / "notes-1" / self.run_dir.name
+        staged = (judge_dir / "input" / "answer" / "answer.md").read_bytes()
+        self.assertEqual(staged, self.answer_bytes)
+        self.assertNotEqual(self.answer_path.read_bytes(), staged)
+        self.assert_ungraded_without_judge()
+
+    def test_changed_deleted_or_empty_answer_is_unknown(self):
+        for name, body in (
+            ("changed", b"Adds: 0\nFixes: 0\n"),
+            ("deleted", None),
+            ("empty", b""),
+            ("whitespace", b" \n"),
+        ):
+            with self.subTest(name=name):
+                self.answer_path.write_bytes(self.answer_bytes)
+                if body is None:
+                    self.answer_path.unlink()
+                else:
+                    self.answer_path.write_bytes(body)
+                self.assert_ungraded_without_judge()
+
+    def test_invalid_executor_receipt_is_unknown(self):
+        original = json.loads(self.receipt_bytes)
+        cases = {
+            "missing": None,
+            "malformed JSON": b"{",
+            "malformed UTF-8": b"\xff",
+            "not an object": b"[]",
+            "missing hash": json.dumps(
+                {k: v for k, v in original.items() if k != "answer_sha256"}
+            ).encode(),
+        }
+        for field, value in (
+            ("answer_sha256", "0" * 64),
+            ("answer_sha256", "not-a-digest"),
+            ("answer_sha256", True),
+            ("schema", True),
+            ("answer", "another-answer.md"),
+            ("answer_present", 1),
+            ("returncode", 1),
+            ("returncode", False),
+            ("timed_out", True),
+            ("error", "executor failed after writing"),
+        ):
+            cases[f"{field}={value!r}"] = json.dumps(original | {field: value}).encode()
+        for name, body in cases.items():
+            with self.subTest(name=name):
+                self.receipt_path.write_bytes(self.receipt_bytes)
+                if body is None:
+                    self.receipt_path.unlink()
+                else:
+                    self.receipt_path.write_bytes(body)
+                self.assert_ungraded_without_judge()
+
+    def test_cached_grade_rechecks_the_answer_and_receipt(self):
+        for name in ("changed", "deleted", "missing receipt", "malformed receipt"):
+            with self.subTest(name=name):
+                self.answer_path.write_bytes(self.answer_bytes)
+                self.receipt_path.write_bytes(self.receipt_bytes)
+                judged = {}
+                rows = []
+
+                def scored():
+                    return ordinary_cli._scored(
+                        self.subject, "notes-1", "agg", 1, self.record, judged, rows, is_base=False
+                    )
+
+                first = scored()
+                self.assertTrue(first.graded, first.error)
+                with mock.patch("harness2.ordinary.run_bounded") as launch:
+                    self.assertIs(scored(), first)
+                launch.assert_not_called()
+                self.assertTrue(first.graded)
+                if name == "changed":
+                    self.answer_path.write_text("changed\n", encoding="utf-8")
+                elif name == "deleted":
+                    self.answer_path.unlink()
+                elif name == "missing receipt":
+                    self.receipt_path.unlink()
+                else:
+                    self.receipt_path.write_text("{", encoding="utf-8")
+                with mock.patch("harness2.ordinary.run_bounded") as launch:
+                    cached = scored()
+                launch.assert_not_called()
+                self.assertIs(cached, first)
+                self.assertEqual(rows, [cached])
+                self.assertFalse(rows[0].graded)
+                self.assertIsNone(cached.frac)
+                self.assertEqual(cached.raw, {})
+                self.assertIn("answer integrity:", cached.error)
+
+
 class ExecutorContractTests(Base):
     def test_timeout_kills_children_that_stay_in_the_process_group(self):
         manifest = load_manifest(self.manifest_path)
@@ -541,6 +695,24 @@ class ExecutorContractTests(Base):
         self.assertEqual(counter.read_text(), "x")
         adapter.execute("notes-1", None, "ordinary-agg1/notes-1/base2")
         self.assertEqual(counter.read_text(), "xx")
+
+    def test_completed_execution_is_not_reused_or_rerun_after_answer_changes(self):
+        adapter = self.adapter()
+        run_id = "ordinary-agg1/notes-1/base1"
+        run_dir = adapter.execute("notes-1", None, run_id)
+        answer = run_dir / "answer.md"
+        original = answer.read_bytes()
+        for name, body in (("changed", b"changed\n"), ("deleted", None), ("empty", b"")):
+            with self.subTest(name=name):
+                answer.write_bytes(original)
+                if body is None:
+                    answer.unlink()
+                else:
+                    answer.write_bytes(body)
+                with mock.patch("harness2.ordinary.run_bounded") as launch:
+                    with self.assertRaisesRegex(RuntimeError, "answer integrity:"):
+                        adapter.execute("notes-1", None, run_id)
+                launch.assert_not_called()
 
     def test_answer_keys_never_reach_the_executor_or_evidence(self):
         task = self.project / "tasks" / "notes-1"

@@ -428,7 +428,16 @@ def _scored(
     run_dir = str(record.get("run_dir") or "")
     key = (task_id, run_dir)
     if run_dir and key in judged:
-        return judged[key]
+        cached = judged[key]
+        try:
+            adapter.verified_answer_bytes(Path(run_dir))
+        except RuntimeError as exc:
+            # Invalidate the shared object so the retained judgment rows agree too.
+            cached.n_passed = cached.n_criteria = None
+            cached.all_pass = False
+            cached.raw = {}
+            cached.error = f"{type(exc).__name__}: {exc}"
+        return cached
     scored = core_judge.judge_one(
         adapter,
         task_id,
